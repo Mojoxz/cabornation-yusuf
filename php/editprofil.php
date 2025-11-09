@@ -10,36 +10,46 @@ if (!isset($_SESSION['user_email'])) {
 
 $email = $_SESSION['user_email'];
 
-// ✅ Ambil data user dari database
-$sql = "SELECT * FROM users WHERE email = '$email'";
-$result = $conn->query($sql);
+// ✅ Ambil data user dari database menggunakan prepared statement
+$stmt = $conn->prepare("SELECT * FROM users WHERE email = ?");
+$stmt->bind_param("s", $email);
+$stmt->execute();
+$result = $stmt->get_result();
 
 if ($result && $result->num_rows > 0) {
     $data = $result->fetch_assoc();
-    $user_id = $data['id']; // ✅ ambil ID user
+    $user_id = $data['id'];
+    
+    // Pastikan semua field yang mungkin null punya default value
+    $data['overview'] = $data['overview'] ?? '';
+    $data['team_name'] = $data['team_name'] ?? '';
+    $data['sport'] = $data['sport'] ?? '';
+    $data['team_desc'] = $data['team_desc'] ?? '';
+    $data['active_tournaments'] = $data['active_tournaments'] ?? 0;
 } else {
-  $user_id = null; // biar gak error
-    $data = [
-       
-        'nama' => 'User',
-        'email' => $email,
-        'overview' => '',
-        'role' => 'official',
-        'team_name' => '',
-        'sport' => '',
-        'team_desc' => '',
-        'active_tournaments' => 0
-    ];
+    // Jika user tidak ditemukan, redirect ke login
+    session_destroy();
+    header("Location: ../html/login.html");
+    exit();
 }
 
 // ✅ Ambil foto dari tabel user_photos (jika ada)
-$sql_foto = "SELECT photo_path FROM user_photos WHERE user_id = '$user_id' LIMIT 1";
-$result_foto = $conn->query($sql_foto);
-if ($result_foto && $result_foto->num_rows > 0) {
-    $foto_row = $result_foto->fetch_assoc();
-    $foto = "../" . ltrim($foto_row['photo_path'], "./"); // pastikan path relatif dari editprofil.php
-} else {
-    $foto = '../assets/profil.png'; // default
+$foto = '../assets/profil.png'; // default
+if ($user_id !== null) {
+    $stmt_foto = $conn->prepare("SELECT photo_path FROM user_photos WHERE user_id = ? LIMIT 1");
+    $stmt_foto->bind_param("i", $user_id);
+    $stmt_foto->execute();
+    $result_foto = $stmt_foto->get_result();
+    
+    if ($result_foto && $result_foto->num_rows > 0) {
+        $foto_row = $result_foto->fetch_assoc();
+        // Pastikan path benar: jika sudah ada ../ di DB, jangan tambah lagi
+        if (strpos($foto_row['photo_path'], '../') === 0) {
+            $foto = $foto_row['photo_path'];
+        } else {
+            $foto = "../" . $foto_row['photo_path'];
+        }
+    }
 }
 
 
@@ -54,50 +64,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $foto_lama = $_POST['foto_lama'];
         $target_file = $foto_lama; // default pakai foto lama
 
-// ✅ Upload foto jika ada
-if (!empty($_FILES['foto']['name'])) {
-    $foto_name = time() . '_' . basename($_FILES['foto']['name']);
-    $target_dir = "../assets/";
-    if (!is_dir($target_dir)) mkdir($target_dir, 0777, true);
-    $target_file = $target_dir . $foto_name;
-    $db_path = "assets/" . $foto_name; // path disimpan ke DB (tanpa ../)
+        // ✅ Upload foto jika ada
+        if (!empty($_FILES['foto']['name'])) {
+            $foto_name = time() . '_' . basename($_FILES['foto']['name']);
+            $target_dir = "../assets/foto_profil/";
+            if (!is_dir($target_dir)) mkdir($target_dir, 0777, true);
+            $target_file = $target_dir . $foto_name;
+            $db_path = "assets/foto_profil/" . $foto_name; // path disimpan ke DB (tanpa ../)
 
-    if (move_uploaded_file($_FILES['foto']['tmp_name'], $target_file)) {
-        // Cek apakah user sudah punya foto
-        $check_photo = $conn->prepare("SELECT id FROM user_photos WHERE user_id = ?");
-        $check_photo->bind_param("i", $user_id);
-        $check_photo->execute();
-        $result_photo = $check_photo->get_result();
+            // Validasi tipe file
+            $allowed_types = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif'];
+            $file_type = $_FILES['foto']['type'];
 
-        if ($result_photo->num_rows > 0) {
-            // Update foto lama
-            $update_photo = $conn->prepare("UPDATE user_photos SET photo_path = ?, uploaded_at = NOW() WHERE user_id = ?");
-            $update_photo->bind_param("si", $db_path, $user_id);
-            $update_photo->execute();
-        } else {
-            // Simpan foto baru
-            $insert_photo = $conn->prepare("INSERT INTO user_photos (user_id, photo_path, uploaded_at) VALUES (?, ?, NOW())");
-            $insert_photo->bind_param("is", $user_id, $db_path);
-            $insert_photo->execute();
+            if (in_array($file_type, $allowed_types)) {
+                if (move_uploaded_file($_FILES['foto']['tmp_name'], $target_file)) {
+                    // Cek apakah user sudah punya foto
+                    $check_photo = $conn->prepare("SELECT id FROM user_photos WHERE user_id = ?");
+                    $check_photo->bind_param("i", $user_id);
+                    $check_photo->execute();
+                    $result_photo = $check_photo->get_result();
+
+                    if ($result_photo->num_rows > 0) {
+                        // Update foto lama
+                        $update_photo = $conn->prepare("UPDATE user_photos SET photo_path = ?, uploaded_at = NOW() WHERE user_id = ?");
+                        $update_photo->bind_param("si", $db_path, $user_id);
+                        $update_photo->execute();
+                    } else {
+                        // Simpan foto baru
+                        $insert_photo = $conn->prepare("INSERT INTO user_photos (user_id, photo_path, uploaded_at) VALUES (?, ?, NOW())");
+                        $insert_photo->bind_param("is", $user_id, $db_path);
+                        $insert_photo->execute();
+                    }
+                    
+                    // Update variabel $foto untuk langsung tampil
+                    $foto = $target_file;
+                } else {
+                    echo "<script>alert('Gagal mengupload foto!');</script>";
+                }
+            } else {
+                echo "<script>alert('Format file tidak didukung! Gunakan JPG, PNG, atau GIF.');</script>";
+            }
         }
-    }
-}
 
-
-        // Update nama & overview di tabel users
-        $sql_update = "UPDATE users SET nama='$nama', overview='$overview' WHERE email='$email'";
-        if ($conn->query($sql_update)) {
+        // Update nama & overview di tabel users menggunakan prepared statement
+        $stmt_update = $conn->prepare("UPDATE users SET nama = ?, overview = ? WHERE email = ?");
+        $stmt_update->bind_param("sss", $nama, $overview, $email);
+        
+        if ($stmt_update->execute()) {
             // ✅ Ambil ulang foto terbaru supaya langsung tampil tanpa reload manual
-            $sql_foto = "SELECT photo_path FROM user_photos WHERE email = '$email' LIMIT 1";
-            $result_foto = $conn->query($sql_foto);
+            $stmt_foto = $conn->prepare("SELECT photo_path FROM user_photos WHERE user_id = ? LIMIT 1");
+            $stmt_foto->bind_param("i", $user_id);
+            $stmt_foto->execute();
+            $result_foto = $stmt_foto->get_result();
+            
             if ($result_foto && $result_foto->num_rows > 0) {
                 $foto_row = $result_foto->fetch_assoc();
-                $foto = "../" . ltrim($foto_row['photo_path'], "./");
+                // Pastikan path benar
+                if (strpos($foto_row['photo_path'], '../') === 0) {
+                    $foto = $foto_row['photo_path'];
+                } else {
+                    $foto = "../" . $foto_row['photo_path'];
+                }
             }
 
-            echo "<script>alert('Profil berhasil diperbarui!');</script>";
+            // Refresh data user
+            $stmt = $conn->prepare("SELECT * FROM users WHERE email = ?");
+            $stmt->bind_param("s", $email);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $data = $result->fetch_assoc();
+
+            echo "<script>alert('Profil berhasil diperbarui!'); window.location='editprofil.php';</script>";
+            exit;
         } else {
-            echo "<script>alert('Gagal memperbarui profil!');</script>";
+            echo "<script>alert('Gagal memperbarui profil: " . $conn->error . "');</script>";
         }
     }
 
@@ -105,15 +145,24 @@ if (!empty($_FILES['foto']['name'])) {
     if (isset($_POST['update_summary'])) {
         $team_name = $_POST['team_name'];
         $sport = $_POST['sport'];
-        $active_tournaments = $_POST['active_tournaments'];
+        $active_tournaments = (int)$_POST['active_tournaments'];
         $team_desc = $_POST['team_desc'];
 
-        $sql_summary = "UPDATE users SET team_name='$team_name', sport='$sport', active_tournaments='$active_tournaments', team_desc='$team_desc' WHERE email='$email'";
-        if ($conn->query($sql_summary)) {
+        $stmt_summary = $conn->prepare("UPDATE users SET team_name = ?, sport = ?, active_tournaments = ?, team_desc = ? WHERE email = ?");
+        $stmt_summary->bind_param("ssiss", $team_name, $sport, $active_tournaments, $team_desc, $email);
+        
+        if ($stmt_summary->execute()) {
+            // Refresh data user
+            $stmt = $conn->prepare("SELECT * FROM users WHERE email = ?");
+            $stmt->bind_param("s", $email);
+            $stmt->execute();
+            $result = $stmt->get_result();
+            $data = $result->fetch_assoc();
+            
             echo "<script>alert('Summary berhasil diperbarui!'); window.location='editprofil.php';</script>";
             exit;
         } else {
-            echo "<script>alert('Gagal memperbarui summary!');</script>";
+            echo "<script>alert('Gagal memperbarui summary: " . $conn->error . "');</script>";
         }
     }
 }
@@ -145,13 +194,19 @@ if (!empty($_FILES['foto']['name'])) {
     <!-- 🔹 Card Profil Atas -->
     <div class="profile-card">
       <div class="profile-header">
-        <div class="profile-pic">
-          <label for="foto">
-            <img id="preview" src="<?php echo htmlspecialchars($foto); ?>" alt="Foto Profil" title="Klik untuk ubah foto">
-            <div class="overlay">Ubah Foto</div>
-          </label>
-          <input type="file" name="foto" id="foto" accept="image/*" onchange="previewImage(event)">
-        </div>
+        <form id="fotoForm" action="editprofil.php" method="POST" enctype="multipart/form-data" style="display:inline;">
+          <div class="profile-pic">
+            <label for="foto">
+              <img id="preview" src="<?php echo htmlspecialchars($foto); ?>" alt="Foto Profil" title="Klik untuk ubah foto">
+              <div class="overlay">Ubah Foto</div>
+            </label>
+            <input type="file" name="foto" id="foto" accept="image/*" onchange="autoSubmitFoto(event)" style="display:none;">
+            <input type="hidden" name="update_profile" value="1">
+            <input type="hidden" name="nama" value="<?php echo htmlspecialchars($data['nama']); ?>">
+            <input type="hidden" name="overview" value="<?php echo htmlspecialchars($data['overview'] ?? ''); ?>">
+            <input type="hidden" name="foto_lama" value="<?php echo htmlspecialchars($foto); ?>">
+          </div>
+        </form>
 
         <div class="profile-info">
           <p class="official"><?php echo ucfirst($data['role']); ?></p>
@@ -176,7 +231,11 @@ if (!empty($_FILES['foto']['name'])) {
 
       <div class="form-group">
         <label>Bio</label>
-        <textarea name="overview" rows="5" placeholder="Tulis bio singkat kamu..."><?php echo htmlspecialchars($data['overview']); ?></textarea>
+        <textarea name="overview" rows="5" placeholder="Tulis bio singkat kamu..."><?php 
+          // Pastikan nilai tidak null sebelum di-output
+          $overview_value = isset($data['overview']) && $data['overview'] !== null ? $data['overview'] : '';
+          echo htmlspecialchars($overview_value); 
+        ?></textarea>
       </div>
 
       <input type="hidden" name="foto_lama" value="<?php echo htmlspecialchars($foto); ?>">
@@ -190,22 +249,22 @@ if (!empty($_FILES['foto']['name'])) {
 
       <div class="form-group">
         <label>Nama Tim</label>
-        <input type="text" name="team_name" value="<?php echo htmlspecialchars($data['team_name']); ?>" placeholder="Contoh: UNESA Volleyball Team">
+        <input type="text" name="team_name" value="<?php echo htmlspecialchars($data['team_name'] ?? ''); ?>" placeholder="Contoh: UNESA Volleyball Team">
       </div>
 
       <div class="form-group">
         <label>Cabang Olahraga</label>
-        <input type="text" name="sport" value="<?php echo htmlspecialchars($data['sport']); ?>" placeholder="Contoh: Voli, Basket, Futsal">
+        <input type="text" name="sport" value="<?php echo htmlspecialchars($data['sport'] ?? ''); ?>" placeholder="Contoh: Voli, Basket, Futsal">
       </div>
 
       <div class="form-group">
         <label>Turnamen Aktif</label>
-        <input type="number" name="active_tournaments" value="<?php echo htmlspecialchars($data['active_tournaments']); ?>" min="0">
+        <input type="number" name="active_tournaments" value="<?php echo htmlspecialchars($data['active_tournaments'] ?? 0); ?>" min="0">
       </div>
 
       <div class="form-group">
         <label>Deskripsi Tim</label>
-        <textarea name="team_desc" rows="5" placeholder="Ceritakan sedikit tentang timmu..."><?php echo htmlspecialchars($data['team_desc']); ?></textarea>
+        <textarea name="team_desc" rows="5" placeholder="Ceritakan sedikit tentang timmu..."><?php echo htmlspecialchars($data['team_desc'] ?? ''); ?></textarea>
       </div>
 
       <button type="submit" name="update_summary" class="btn-main">Simpan Summary</button>
@@ -213,13 +272,24 @@ if (!empty($_FILES['foto']['name'])) {
   </main>
 
   <script>
-    // ✅ Preview Foto sebelum upload
-    function previewImage(event) {
-      const reader = new FileReader();
-      reader.onload = function() {
-        document.getElementById('preview').src = reader.result;
-      };
-      reader.readAsDataURL(event.target.files[0]);
+    // ✅ Preview Foto dan Auto Submit
+    function autoSubmitFoto(event) {
+      const file = event.target.files[0];
+      if (file) {
+        // Preview gambar
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          document.getElementById('preview').src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+        
+        // Auto submit form
+        setTimeout(function() {
+          if (confirm('Upload foto ini?')) {
+            document.getElementById('fotoForm').submit();
+          }
+        }, 100);
+      }
     }
   </script>
 </body>
